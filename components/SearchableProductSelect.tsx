@@ -51,11 +51,11 @@ export function SearchableProductSelect({
   // Focus input when dropdown opens
   React.useEffect(() => {
     if (open) {
-      // Use requestAnimationFrame to ensure DOM is ready
-      requestAnimationFrame(() => {
+      // Use setTimeout to ensure DOM is ready after popover animation
+      setTimeout(() => {
         inputRef.current?.focus()
         inputRef.current?.select()
-      })
+      }, 50)
     }
     if (!open) {
       setSearchQuery("")
@@ -75,7 +75,7 @@ export function SearchableProductSelect({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen} modal={true}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <div 
           role="combobox"
@@ -113,7 +113,13 @@ export function SearchableProductSelect({
         className="w-[var(--radix-popover-trigger-width)] p-0 max-w-[400px]" 
         align="start" 
         sideOffset={4}
-        onOpenAutoFocus={(e) => e.preventDefault()}
+        onInteractOutside={(e) => {
+          // Allow clicking outside to close but prevent closing when clicking on trigger
+          const target = e.target as HTMLElement
+          if (target.closest('[role="combobox"]')) {
+            e.preventDefault()
+          }
+        }}
       >
         {/* Search input - always visible at top */}
         <div className="flex items-center border-b px-3 py-2 bg-background sticky top-0 z-10">

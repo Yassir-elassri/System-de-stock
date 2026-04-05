@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { toast } from "sonner"
 import { Search, Plus, Printer, Edit, Trash2, Eye } from "lucide-react"
 import { generateModernInvoiceHTML } from "./invoice-template"
+import { SearchableProductSelect } from "@/components/SearchableProductSelect"
 
 interface Product {
   id: number
@@ -1016,21 +1017,12 @@ export default function SalesPage() {
                     <div className="grid grid-cols-5 gap-4 items-end">
                       <div className="col-span-2">
                         <Label>Produit</Label>
-                        <Select
-                          value={item.product_id.toString()}
-                          onValueChange={(value) => updateItem(index, 'product_id', parseInt(value))}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Sélectionner un produit" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {products.map((product) => (
-                              <SelectItem key={product.id} value={product.id.toString()}>
-                                {product.name} (Stock: {product.current_stock})
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <SearchableProductSelect
+                          products={products}
+                          value={item.product_id}
+                          onChange={(productId) => updateItem(index, 'product_id', productId)}
+                          placeholder="Rechercher un produit..."
+                        />
                       </div>
                       
                       <div>
@@ -1477,10 +1469,11 @@ export default function SalesPage() {
                     {formData.items.map((item, index) => (
                       <div key={index} className="flex items-center gap-2 p-2 bg-white rounded border">
                         <div className="flex-1 grid grid-cols-4 gap-2">
-                          <Select
-                            value={item.product_id?.toString() || ""}
-                            onValueChange={(value) => {
-                              const selectedProduct = products.find(p => p.id.toString() === value)
+                          <SearchableProductSelect
+                            products={products}
+                            value={item.product_id || 0}
+                            onChange={(productId) => {
+                              const selectedProduct = products.find(p => p.id === productId)
                               const updatedItems = [...formData.items]
                               if (selectedProduct) {
                                 updatedItems[index].product_id = selectedProduct.id
@@ -1490,18 +1483,8 @@ export default function SalesPage() {
                               }
                               setFormData({...formData, items: updatedItems})
                             }}
-                          >
-                            <SelectTrigger className="text-sm">
-                              <SelectValue placeholder="Sélectionner un produit" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {products.map((product) => (
-                                <SelectItem key={product.id} value={product.id.toString()}>
-                                  {product.name} - {product.selling_price.toFixed(2)} DH (Stock: {product.current_stock})
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                            placeholder="Rechercher un produit..."
+                          />
                           <Input
                             type="number"
                             value={item.quantity}
