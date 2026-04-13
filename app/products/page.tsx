@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo } from "react"
+import { format } from "date-fns"
 import { normalizeSearchQuery, productMatchesSearch } from "@/lib/search-utils"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -10,7 +11,21 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Plus, Search, Edit, Trash2, AlertTriangle, Package, Eye, Save, X, DollarSign, TrendingUp } from "lucide-react"
+import {
+  Plus,
+  Search,
+  Edit,
+  Trash2,
+  AlertTriangle,
+  Package,
+  Eye,
+  Save,
+  X,
+  DollarSign,
+  TrendingUp,
+  FileSpreadsheet,
+  Loader2,
+} from "lucide-react"
 import { toast } from "sonner"
 
 // Données d'exemple - à remplacer par des appels API
@@ -63,6 +78,7 @@ export default function ProductsPage() {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isLoadingProducts, setIsLoadingProducts] = useState(true)
+  const [isExportingExcel, setIsExportingExcel] = useState(false)
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -304,6 +320,41 @@ export default function ProductsPage() {
     toast.success("Stock ajusté avec succès")
   }
 
+  const handleExportExcel = async () => {
+    setIsExportingExcel(true)
+    try {
+      const response = await fetch("/api/products/export", { cache: "no-store" })
+      if (!response.ok) {
+        let message = "Erreur lors de l'export Excel"
+        try {
+          const err = await response.json()
+          if (err && typeof err.error === "string") message = err.error
+        } catch {
+          /* ignore */
+        }
+        toast.error(message)
+        return
+      }
+      const blob = await response.blob()
+      const fileName = `produits_${format(new Date(), "yyyy-MM-dd")}.xlsx`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = fileName
+      a.rel = "noopener"
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success("Fichier Excel téléchargé")
+    } catch (error) {
+      console.error("Export Excel:", error)
+      toast.error("Erreur lors de l'export Excel")
+    } finally {
+      setIsExportingExcel(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -311,10 +362,26 @@ export default function ProductsPage() {
           <h1 className="text-3xl font-bold text-slate-900">Gestion des Produits</h1>
           <p className="text-slate-600">Gérez votre inventaire et stock</p>
         </div>
-        <Button className="flex items-center gap-2" onClick={handleAddProduct}>
-          <Plus className="h-4 w-4" />
-          Nouveau Produit
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="flex items-center gap-2"
+            onClick={handleExportExcel}
+            disabled={isExportingExcel || isLoadingProducts}
+          >
+            {isExportingExcel ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <FileSpreadsheet className="h-4 w-4" aria-hidden />
+            )}
+            {isExportingExcel ? "Export en cours…" : "Exporter en Excel"}
+          </Button>
+          <Button className="flex items-center gap-2" onClick={handleAddProduct}>
+            <Plus className="h-4 w-4" />
+            Nouveau Produit
+          </Button>
+        </div>
       </div>
 
       {/* Statistiques rapides */}

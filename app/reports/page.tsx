@@ -12,6 +12,7 @@ import {
   Users, 
   Calendar,
   Download,
+  Loader2,
   FileText,
   FileText as FileTextIcon,
   CreditCard,
@@ -92,13 +93,13 @@ interface ReportData {
 }
 
 const reportTypes = [
-  { value: "today", label: "Rapport d'Aujourd'hui", icon: Calendar },
-  { value: "month", label: "Rapport Mensuel", icon: TrendingUp },
-  { value: "year", label: "Rapport d'Année", icon: BarChart3 }
+  { value: "daily", label: "Rapport d'Aujourd'hui", icon: Calendar },
+  { value: "monthly", label: "Rapport Mensuel", icon: TrendingUp },
+  { value: "yearly", label: "Rapport d'Année", icon: BarChart3 }
 ]
 
 export default function ReportsPage() {
-  const [selectedReport, setSelectedReport] = useState("today")
+  const [selectedReport, setSelectedReport] = useState("daily")
   const [lastGeneratedReport, setLastGeneratedReport] = useState<any>(null)
   const [reportData, setReportData] = useState<ReportData>({
     sales: { total: 0, count: 0, average: 0, growth: 0, today: 0, todayCount: 0, yearly: 0, yearlyCount: 0 },
@@ -114,6 +115,8 @@ export default function ReportsPage() {
     employees: { total: 0, totalSalary: 0, activeCount: 0 }
   })
   const [loading, setLoading] = useState(true)
+  const [reportFetchLoading, setReportFetchLoading] = useState(false)
+  const [reportFetchError, setReportFetchError] = useState<string | null>(null)
   const [generatedReports, setGeneratedReports] = useState<Array<{
     id: string
     type: string
@@ -122,6 +125,12 @@ export default function ReportsPage() {
     dateRangeLabel: string
     timestamp: string
     data: any
+    meta?: {
+      startDate: string
+      endDate: string
+      totalOrders: number
+      totalRevenue: number
+    }
   }>>([])
   const [manualPaymentsCount, setManualPaymentsCount] = useState(0)
   const [salaryPaymentsCount, setSalaryPaymentsCount] = useState(0)
@@ -223,7 +232,7 @@ export default function ReportsPage() {
         
         const yearlySalesCount = salesData.filter((sale: any) => {
           const saleDate = new Date(sale.sale_date || sale.created_at || Date.now())
-          return saleDate.getMonth() === currentMonth && saleDate.getFullYear() === currentYear
+          return saleDate.getFullYear() === thisYear
         }).length
         
         // Calculate product metrics
@@ -423,31 +432,49 @@ export default function ReportsPage() {
 
 
 
-  const generateReport = (reportType: string) => {
-    // Generate report based on selection
-    const reportConfig = reportTypes.find(r => r.value === reportType)
-    
-    const newReport = {
-      id: `report-${Date.now()}`,
-      type: reportType,
-      typeLabel: reportConfig?.label || 'Rapport',
-      dateRange: reportType,
-      dateRangeLabel: reportConfig?.label || 'Période',
-      timestamp: new Date().toISOString(),
-      data: reportData
+  const generateReport = async (reportType: string) => {
+    const reportConfig = reportTypes.find((r) => r.value === reportType)
+    setReportFetchError(null)
+    setReportFetchLoading(true)
+    try {
+      const url = `/api/reports?type=${encodeURIComponent(reportType)}`
+      const res = await fetch(url, { cache: "no-store" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || !json?.success) {
+        const msg = typeof json?.error === "string" ? json.error : "Impossible de générer le rapport"
+        setReportFetchError(msg)
+        toast.error(msg)
+        return
+      }
+
+      const newReport = {
+        id: `report-${Date.now()}`,
+        type: json.type as string,
+        typeLabel: reportConfig?.label || "Rapport",
+        dateRange: json.type as string,
+        dateRangeLabel: reportConfig?.label || "Période",
+        timestamp: new Date().toISOString(),
+        data: json.summary,
+        meta: {
+          startDate: json.startDate as string,
+          endDate: json.endDate as string,
+          totalOrders: json.totalOrders as number,
+          totalRevenue: json.totalRevenue as number,
+        },
+      }
+
+      setGeneratedReports((prev) => [newReport, ...prev])
+      setLastGeneratedReport(newReport)
+      toast.success(`Rapport ${reportConfig?.label} généré avec succès`)
+      console.log("Generated report (API):", newReport)
+    } catch (e) {
+      console.error(e)
+      const msg = "Erreur réseau lors de la génération du rapport"
+      setReportFetchError(msg)
+      toast.error(msg)
+    } finally {
+      setReportFetchLoading(false)
     }
-    
-    // Add to generated reports
-    setGeneratedReports(prev => [newReport, ...prev])
-    
-    // Store as last generated report
-    setLastGeneratedReport(newReport)
-    
-    // Show success message
-    toast.success(`Rapport ${reportConfig?.label} généré avec succès`)
-    
-    // Log the generated report
-    console.log('Generated report:', newReport)
   }
 
   // Generate specific report content based on report type
@@ -1681,31 +1708,16 @@ export default function ReportsPage() {
     const previousMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1)
     const previousMonthName = previousMonth.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
     
-    // Determine report type and calculate metrics
     const reportTypeValue = dateRange?.value
-    let reportSales = 0
-    let reportTransactions = 0
-    let reportAverage = 0
-    let reportGrowth = data.sales.growth
-    
-    if (reportTypeValue === 'today') {
-      reportSales = data.sales.today
-      reportTransactions = data.sales.todayCount
-      reportAverage = reportTransactions > 0 ? reportSales / reportTransactions : 0
-    } else if (reportTypeValue === 'month') {
-      reportSales = data.sales.total
-      reportTransactions = data.sales.count
-      reportAverage = reportTransactions > 0 ? reportSales / reportTransactions : 0
-    } else if (reportTypeValue === 'year') {
-      reportSales = data.sales.yearly
-      reportTransactions = data.sales.yearlyCount
-      reportAverage = reportTransactions > 0 ? reportSales / reportTransactions : 0
-    }
+    const reportSales = data.sales.total
+    const reportTransactions = data.sales.count
+    const reportAverage = reportTransactions > 0 ? reportSales / reportTransactions : 0
+    const reportGrowth = data.sales.growth
     
     return `
       <html>
         <head>
-          <title>${reportTypeValue === 'today' ? 'Rapport d\'Aujourd\'hui' : reportTypeValue === 'month' ? 'Rapport Mensuel' : 'Rapport d\'Année'}</title>
+          <title>${reportTypeValue === 'daily' ? 'Rapport d\'Aujourd\'hui' : reportTypeValue === 'monthly' ? 'Rapport Mensuel' : 'Rapport d\'Année'}</title>
           <style>
             @media print {
               .page-break { page-break-before: always; }
@@ -1930,13 +1942,13 @@ export default function ReportsPage() {
           <div class="page">
             <div class="cover-page">
               <div class="company-logo">📊</div>
-              <h1 class="report-title">${reportTypeValue === 'today' ? 'Rapport d\'Aujourd\'hui' : reportTypeValue === 'month' ? 'Rapport Mensuel' : 'Rapport d\'Année'}</h1>
-              <p class="report-subtitle">${reportTypeValue === 'today' ? 'Vue d\'ensemble de l\'activité du jour' : reportTypeValue === 'month' ? 'Vue d\'ensemble mensuelle de l\'activité commerciale' : 'Vue d\'ensemble annuelle de l\'activité commerciale'}</p>
+              <h1 class="report-title">${reportTypeValue === 'daily' ? 'Rapport d\'Aujourd\'hui' : reportTypeValue === 'monthly' ? 'Rapport Mensuel' : 'Rapport d\'Année'}</h1>
+              <p class="report-subtitle">${reportTypeValue === 'daily' ? 'Vue d\'ensemble de l\'activité du jour' : reportTypeValue === 'monthly' ? 'Vue d\'ensemble mensuelle de l\'activité commerciale' : 'Vue d\'ensemble annuelle de l\'activité commerciale'}</p>
               
               <div class="report-meta">
                 <div class="meta-item">
                   <span class="meta-label">Période:</span>
-                  <span>${reportTypeValue === 'today' ? currentDay : reportTypeValue === 'month' ? currentMonth : new Date().getFullYear().toString()}</span>
+                  <span>${reportTypeValue === 'daily' ? currentDay : reportTypeValue === 'monthly' ? currentMonth : new Date().getFullYear().toString()}</span>
                 </div>
                 <div class="meta-item">
                   <span class="meta-label">Généré le:</span>
@@ -1944,7 +1956,7 @@ export default function ReportsPage() {
                 </div>
                 <div class="meta-item">
                   <span class="meta-label">Type de rapport:</span>
-                  <span>${reportTypeValue === 'today' ? 'Rapport d\'Aujourd\'hui' : reportTypeValue === 'month' ? 'Rapport Mensuel' : 'Rapport d\'Année'}</span>
+                  <span>${reportTypeValue === 'daily' ? 'Rapport d\'Aujourd\'hui' : reportTypeValue === 'monthly' ? 'Rapport Mensuel' : 'Rapport d\'Année'}</span>
                 </div>
                 <div class="meta-item">
                   <span class="meta-label">Version:</span>
@@ -1968,15 +1980,15 @@ export default function ReportsPage() {
                 <div class="summary-grid">
           <div class="summary-card">
                     <div class="summary-value">${reportSales.toFixed(2)} DH</div>
-                    <div class="summary-label">${reportTypeValue === 'today' ? 'Ventes du Jour' : reportTypeValue === 'month' ? 'Ventes du Mois' : 'Ventes de l\'Année'}</div>
+                    <div class="summary-label">${reportTypeValue === 'daily' ? 'Ventes du Jour' : reportTypeValue === 'monthly' ? 'Ventes du Mois' : 'Ventes de l\'Année'}</div>
           </div>
           <div class="summary-card">
             <div class="summary-value">${data.products.total}</div>
                     <div class="summary-label">Produits en Stock</div>
           </div>
           <div class="summary-card">
-                    <div class="summary-value">${reportTypeValue === 'today' ? data.sales.todayCount : reportTypeValue === 'month' ? data.customers.active : data.sales.yearlyCount}</div>
-                    <div class="summary-label">${reportTypeValue === 'today' ? 'Transactions' : reportTypeValue === 'month' ? 'Clients Actifs' : 'Transactions'}</div>
+                    <div class="summary-value">${reportTransactions}</div>
+                    <div class="summary-label">Transactions</div>
           </div>
           <div class="summary-card">
             <div class="summary-value">${data.financial.profit.toFixed(2)} DH</div>
@@ -1992,13 +2004,13 @@ export default function ReportsPage() {
           <!-- ${reportTypeValue} Breakdown -->
           <div class="page">
             <div class="section">
-              <h2 class="section-title">📅 ${reportTypeValue === 'today' ? 'Analyse Quotidienne' : reportTypeValue === 'month' ? 'Analyse Mensuelle' : 'Analyse Annuelle'} Détaillée</h2>
+              <h2 class="section-title">📅 ${reportTypeValue === 'daily' ? 'Analyse Quotidienne' : reportTypeValue === 'monthly' ? 'Analyse Mensuelle' : 'Analyse Annuelle'} Détaillée</h2>
               
               <div class="monthly-breakdown">
-                <h3>Performance ${reportTypeValue === 'today' ? 'du Jour' : reportTypeValue === 'month' ? 'du Mois' : 'de l\'Année'}: ${reportTypeValue === 'today' ? currentDay : reportTypeValue === 'month' ? currentMonth : new Date().getFullYear().toString()}</h3>
+                <h3>Performance ${reportTypeValue === 'daily' ? 'du Jour' : reportTypeValue === 'monthly' ? 'du Mois' : 'de l\'Année'}: ${reportTypeValue === 'daily' ? currentDay : reportTypeValue === 'monthly' ? currentMonth : new Date().getFullYear().toString()}</h3>
                 
                 <div class="metric-row">
-                  <span class="metric-label">Chiffre d'Affaires ${reportTypeValue === 'today' ? 'du Jour' : reportTypeValue === 'month' ? 'du Mois' : 'de l\'Année'}:</span>
+                  <span class="metric-label">Chiffre d'Affaires ${reportTypeValue === 'daily' ? 'du Jour' : reportTypeValue === 'monthly' ? 'du Mois' : 'de l\'Année'}:</span>
                   <span class="metric-value">${reportSales.toFixed(2)} DH</span>
                 </div>
                 <div class="metric-row">
@@ -2037,7 +2049,7 @@ export default function ReportsPage() {
                     <td><strong>Ventes</strong></td>
                     <td>${reportSales.toFixed(2)} DH</td>
                     <td>${reportTransactions} transactions</td>
-                    <td>${reportTypeValue === 'today' ? (reportSales > 100 ? '✓ Bon jour' : reportSales > 50 ? '✓ Moyen' : '⚠ À améliorer') : reportTypeValue === 'month' ? (reportSales > 1000 ? '✓ Excellent' : reportSales > 500 ? '✓ Bon' : '⚠ À améliorer') : (reportSales > 10000 ? '✓ Excellent' : reportSales > 5000 ? '✓ Bon' : '⚠ À améliorer')}</td>
+                    <td>${reportTypeValue === 'daily' ? (reportSales > 100 ? '✓ Bon jour' : reportSales > 50 ? '✓ Moyen' : '⚠ À améliorer') : reportTypeValue === 'monthly' ? (reportSales > 1000 ? '✓ Excellent' : reportSales > 500 ? '✓ Bon' : '⚠ À améliorer') : (reportSales > 10000 ? '✓ Excellent' : reportSales > 5000 ? '✓ Bon' : '⚠ À améliorer')}</td>
                   </tr>
                   <tr>
                     <td><strong>Stock</strong></td>
@@ -2192,8 +2204,8 @@ export default function ReportsPage() {
   const downloadReport = (report?: any) => {
     // Use provided report, last generated report, or create a default report
     const targetReport = report || lastGeneratedReport || {
-      type: 'today', // Default to today's report
-      dateRange: 'today',
+      type: 'daily',
+      dateRange: 'daily',
       timestamp: new Date().toISOString(),
       data: reportData
     }
@@ -2800,20 +2812,39 @@ export default function ReportsPage() {
           <CardTitle>Génération de Rapports</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {reportFetchError ? (
+            <p className="text-sm text-red-600" role="alert">
+              {reportFetchError}
+            </p>
+          ) : null}
+          {lastGeneratedReport?.meta ? (
+            <p className="text-sm text-muted-foreground">
+              Dernier rapport:{" "}
+              {new Date(lastGeneratedReport.meta.startDate).toLocaleString("fr-FR")} →{" "}
+              {new Date(lastGeneratedReport.meta.endDate).toLocaleString("fr-FR")}
+              {" · "}
+              {lastGeneratedReport.meta.totalOrders} commandes ·{" "}
+              {Number(lastGeneratedReport.meta.totalRevenue).toFixed(2)} DH
+            </p>
+          ) : null}
           <div className="grid grid-cols-3 gap-4">
             {reportTypes.map((reportType) => (
-              <Button 
+              <Button
                 key={reportType.value}
-                onClick={() => generateReport(reportType.value)} 
+                onClick={() => void generateReport(reportType.value)}
                 className="flex items-center gap-2 h-12"
                 variant="outline"
+                disabled={reportFetchLoading}
               >
-                <reportType.icon className="h-4 w-4" />
+                {reportFetchLoading ? (
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden />
+                ) : (
+                  <reportType.icon className="h-4 w-4 shrink-0" />
+                )}
                 {reportType.label}
               </Button>
             ))}
-            </div>
-
+          </div>
         </CardContent>
       </Card>
 
@@ -2839,7 +2870,7 @@ export default function ReportsPage() {
                   <p className="text-sm">Utilisez les contrôles ci-dessus pour générer votre premier rapport</p>
                 </div>
                 <Button 
-                  onClick={() => generateReport('month')}
+                  onClick={() => generateReport('monthly')}
                   className="bg-blue-600 hover:bg-blue-700"
                 >
                   <FileText className="h-4 w-4 mr-2" />
@@ -2853,7 +2884,7 @@ export default function ReportsPage() {
                     <BarChart3 className="h-5 w-5 text-green-500" />
                     <div>
                       <p className="font-medium">
-                        {report.type === 'today' ? 'Rapport d\'Aujourd\'hui' : report.type === 'month' ? 'Rapport Mensuel' : 'Rapport d\'Année'}
+                        {report.type === 'daily' ? 'Rapport d\'Aujourd\'hui' : report.type === 'monthly' ? 'Rapport Mensuel' : 'Rapport d\'Année'}
                       </p>
                       <p className="text-sm text-muted-foreground">
                         Généré le {new Date(report.timestamp || new Date().toISOString()).toLocaleDateString('fr-FR')} à {new Date(report.timestamp || new Date().toISOString()).toLocaleTimeString('fr-FR')}

@@ -3,6 +3,13 @@ import db, { initializeDatabase } from "@/lib/database"
 
 initializeDatabase()
 
+class SaleValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SaleValidationError"
+  }
+}
+
 export async function GET() {
   try {
     const sales = db.prepare(`
@@ -63,7 +70,6 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    console.log("Received sale data:", body)
     const { client_id, total_amount, payment_method, cash_amount, credit_amount, notes, items } = body
     if (!total_amount || !payment_method) {
       return NextResponse.json({ error: "Champs obligatoires manquants" }, { status: 400 })
@@ -82,6 +88,22 @@ export async function POST(request: NextRequest) {
 
     // Start transaction
     const transaction = db.transaction(() => {
+      if (items && Array.isArray(items) && items.length > 0) {
+        for (const item of items) {
+          const product = db
+            .prepare("SELECT name, current_stock FROM products WHERE id = ?")
+            .get(item.product_id) as { name: string; current_stock: number } | undefined
+          if (!product) {
+            throw new SaleValidationError(`Produit avec l'ID ${item.product_id} non trouvé`)
+          }
+          if (product.current_stock < item.quantity) {
+            throw new SaleValidationError(
+              `Stock insuffisant pour "${product.name}". Disponible: ${product.current_stock}, Demandé: ${item.quantity}`,
+            )
+          }
+        }
+      }
+
       // Insert the sale
       const saleStmt = db.prepare(`
         INSERT INTO sales (
@@ -113,7 +135,6 @@ export async function POST(request: NextRequest) {
         notes || null
       )
       const saleId = saleResult.lastInsertRowid
-      console.log("Created sale with ID:", saleId)
 
       // If there's a credit amount and client_id, create a client credit record
       if (finalCreditAmount > 0 && client_id) {
@@ -129,7 +150,6 @@ export async function POST(request: NextRequest) {
           saleId,
           `Crédit de vente #${saleId}${payment_method === 'mixed' ? ' (paiement mixte)' : ''}`
         )
-        console.log("Created client credit record for amount:", finalCreditAmount)
       }
 
       // Create cash register entries
@@ -145,7 +165,6 @@ export async function POST(request: NextRequest) {
           `Vente #${saleId}${payment_method === 'mixed' ? ' (portion espèces)' : ''}`,
           client_id || null
         )
-        console.log("Created cash register entry for cash amount:", finalCashAmount)
       }
 
       if (finalCreditAmount > 0) {
@@ -160,29 +179,9 @@ export async function POST(request: NextRequest) {
           `Vente #${saleId}${payment_method === 'mixed' ? ' (portion crédit)' : ''}`,
           client_id || null
         )
-        console.log("Created cash register entry for credit amount:", finalCreditAmount)
       }
 
-      // Insert sale items if provided
-      console.log("Items received in API:", items)
-      console.log("Items type:", typeof items)
-      console.log("Items is array:", Array.isArray(items))
-      console.log("Items length:", items?.length)
-      
       if (items && Array.isArray(items) && items.length > 0) {
-        console.log("Inserting sale items:", items)
-        
-        // First, validate stock availability
-        for (const item of items) {
-          const product = db.prepare("SELECT name, current_stock FROM products WHERE id = ?").get(item.product_id) as any
-          if (!product) {
-            throw new Error(`Produit avec l'ID ${item.product_id} non trouvé`)
-          }
-          if (product.current_stock < item.quantity) {
-            throw new Error(`Stock insuffisant pour "${product.name}". Disponible: ${product.current_stock}, Demandé: ${item.quantity}`)
-          }
-        }
-        
         const itemStmt = db.prepare(`
           INSERT INTO sale_items (
             sale_id, product_id, quantity, unit_price, additional_price, total_price
@@ -197,34 +196,23 @@ export async function POST(request: NextRequest) {
         `)
         
         for (const item of items) {
-          console.log("Inserting item:", item)
           const basePrice = item.quantity * item.unit_price
           const additionalPrice = item.additional_price || 0
           const totalPrice = basePrice + additionalPrice
-          console.log("Calculated base price:", basePrice, "additional price:", additionalPrice, "total price:", totalPrice)
-          
-          // Insert sale item
-          const itemResult = itemStmt.run(saleId, item.product_id, item.quantity, item.unit_price, additionalPrice, totalPrice)
-          console.log("Inserted sale item with ID:", itemResult.lastInsertRowid)
-          
-          // Reduce stock
-          const stockUpdate = updateStockStmt.run(item.quantity, item.product_id)
-          console.log(`Reduced stock for product ${item.product_id} by ${item.quantity} units`)
-          
-          // Check if stock is now below minimum
-          const updatedProduct = db.prepare("SELECT name, current_stock, minimum_stock FROM products WHERE id = ?").get(item.product_id) as any
+
+          itemStmt.run(saleId, item.product_id, item.quantity, item.unit_price, additionalPrice, totalPrice)
+
+          updateStockStmt.run(item.quantity, item.product_id)
+
+          const updatedProduct = db
+            .prepare("SELECT name, current_stock, minimum_stock FROM products WHERE id = ?")
+            .get(item.product_id) as { name: string; current_stock: number; minimum_stock: number } | undefined
           if (updatedProduct && updatedProduct.current_stock < updatedProduct.minimum_stock) {
-            console.log(`⚠️ Warning: Product "${updatedProduct.name}" stock (${updatedProduct.current_stock}) is below minimum (${updatedProduct.minimum_stock})`)
+            console.warn(
+              `Product "${updatedProduct.name}" stock (${updatedProduct.current_stock}) is below minimum (${updatedProduct.minimum_stock})`,
+            )
           }
         }
-        
-        // Verify items were inserted
-        const insertedItems = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(saleId)
-        console.log("Verification - inserted items for sale:", saleId, ":", insertedItems)
-        
-        // Check if sale_items table exists
-        const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sale_items'").get()
-        console.log("sale_items table exists during sale creation:", !!tableExists)
       }
 
       // Return the new sale with client name
@@ -239,15 +227,18 @@ export async function POST(request: NextRequest) {
     })
 
     const newSale = transaction()
-    console.log("Successfully created sale:", newSale)
     return NextResponse.json(newSale, { status: 201 })
   } catch (error) {
+    if (error instanceof SaleValidationError) {
+      return NextResponse.json({ error: error.message }, { status: 400 })
+    }
     console.error("Error creating sale:", error)
-        console.error("Error details:", error instanceof Error ? error.message : 'Unknown error')
-    console.error("Error stack:", error instanceof Error ? error.stack : 'No stack trace')
-    return NextResponse.json({ 
-      error: "Erreur lors de la création de la vente", 
-      details: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: "Erreur lors de la création de la vente",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 },
+    )
   }
 } 

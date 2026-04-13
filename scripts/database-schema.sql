@@ -195,3 +195,15 @@ CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sale_date);
 CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_client_credits_client ON client_credits(client_id);
 CREATE INDEX IF NOT EXISTS idx_private_credits_client ON private_credits(client_id);
+
+-- Report / analytics: filter by created_at
+CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales(created_at);
+CREATE INDEX IF NOT EXISTS idx_purchases_created_at ON purchases(created_at);
+CREATE INDEX IF NOT EXISTS idx_clients_created_at ON clients(created_at);
+CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses(created_at);
+CREATE INDEX IF NOT EXISTS idx_broken_products_created_at ON broken_products(created_at);
+CREATE INDEX IF NOT EXISTS idx_private_credits_created_at ON private_credits(created_at);
+CREATE INDEX IF NOT EXISTS idx_manual_payments_created_at ON manual_payments(created_at);
+CREATE INDEX IF NOT EXISTS idx_employees_created_at ON employees(created_at);
+CREATE INDEX IF NOT EXISTS idx_suppliers_created_at ON suppliers(created_at);
+CREATE INDEX IF NOT EXISTS idx_products_created_at ON products(created_at);

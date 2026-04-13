@@ -407,6 +407,57 @@ ensurePrivateCreditsDueDate()
 // Check all required tables exist
 ensureAllTablesExist()
 
+/** Speed up report date-range filters (column chosen per legacy schema). */
+function ensureReportIndexes() {
+  const allowTables = new Set([
+    "sales",
+    "purchases",
+    "clients",
+    "products",
+    "expenses",
+    "broken_products",
+    "private_credits",
+    "manual_payments",
+    "cash_register",
+    "employees",
+    "suppliers",
+  ])
+  const plans: [string, string[]][] = [
+    ["sales", ["created_at", "sale_date"]],
+    ["purchases", ["created_at", "purchase_date"]],
+    ["clients", ["created_at", "date_created"]],
+    ["expenses", ["created_at", "expense_date"]],
+    ["broken_products", ["created_at", "broken_date"]],
+    ["private_credits", ["created_at", "credit_date"]],
+    ["manual_payments", ["created_at", "payment_date"]],
+    ["employees", ["created_at", "hire_date"]],
+    ["suppliers", ["created_at"]],
+    ["products", ["created_at"]],
+    ["cash_register", ["created_at", "transaction_date", "date"]],
+  ]
+  const pickCol = (table: string, candidates: string[]): string | null => {
+    if (!allowTables.has(table)) return null
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    const names = new Set(rows.map((r) => r.name))
+    for (const c of candidates) {
+      if (names.has(c)) return c
+    }
+    return null
+  }
+  for (const [table, candidates] of plans) {
+    const col = pickCol(table, candidates)
+    if (!col) continue
+    const idx = `idx_${table}_${col}_report_range`
+    try {
+      db.exec(`CREATE INDEX IF NOT EXISTS "${idx}" ON ${table}(${col})`)
+    } catch (e) {
+      console.error("[ensureReportIndexes]", table, col, e)
+    }
+  }
+}
+
+ensureReportIndexes()
+
 // Function to check if database needs to be recreated
 function checkDatabaseIntegrity() {
   try {

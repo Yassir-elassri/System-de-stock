@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Search, Plus, ShoppingCart, DollarSign, Truck, TrendingUp, Eye, Edit, Trash2, Filter, X, Download } from "lucide-react"
+import { Search, Plus, ShoppingCart, DollarSign, Truck, TrendingUp, Eye, Edit, Trash2, Filter, X } from "lucide-react"
 import { toast } from "sonner"
 
 // Utility function to safely parse JSON responses
@@ -48,6 +48,82 @@ const safeJsonParse = async (response: Response) => {
   }
 }
 
+/** One source of truth for invoice math: same fields as the form / API lines */
+function normalizePurchaseInvoiceItems(purchase: { items?: unknown }): any[] {
+  if (!Array.isArray(purchase?.items)) return []
+  return purchase.items.map((item: any) => ({
+    ...item,
+    designation: item.designation ?? "",
+    quantity: item.quantity,
+    unit_price: item.unit_price,
+    additional_price: item.additional_price ?? 0,
+    avance: item.avance ?? 0,
+  }))
+}
+
+function preparePurchaseForInvoiceDocument(purchase: any) {
+  const items = normalizePurchaseInvoiceItems(purchase)
+  const agg = aggregatePurchaseDocumentTotals(items)
+  const totalGeneral =
+    items.length > 0 ? agg.totalSum : round2(parseMoney(purchase?.total_amount))
+  return {
+    ...purchase,
+    items,
+    _agg: agg,
+    _totalGeneral: totalGeneral,
+  }
+}
+
+function paymentMethodLabelHtml(method: string | undefined): string {
+  switch (method) {
+    case "cash":
+      return "Espèces / <span class=\"arabic-text\">نقداً</span>"
+    case "credit":
+      return "Crédit / <span class=\"arabic-text\">ائتمان</span>"
+    case "card":
+      return "Carte / <span class=\"arabic-text\">بطاقة</span>"
+    case "transfer":
+    case "bank_transfer":
+      return "Virement / <span class=\"arabic-text\">تحويل</span>"
+    case "check":
+      return "Chèque / <span class=\"arabic-text\">شيك</span>"
+    default:
+      return escapeHtmlInvoice(method || "—")
+  }
+}
+
+function paymentMethodLabelText(method: string | undefined): string {
+  switch (method) {
+    case "cash":
+      return "Espèces"
+    case "credit":
+      return "Crédit"
+    case "card":
+      return "Carte"
+    case "transfer":
+    case "bank_transfer":
+      return "Virement"
+    case "check":
+      return "Chèque"
+    default:
+      return method || "—"
+  }
+}
+
+function formatPurchaseInvoiceDate(purchase_date: unknown): string {
+  if (purchase_date == null || purchase_date === "") return "—"
+  const d = new Date(purchase_date as string)
+  if (Number.isNaN(d.getTime())) return escapeHtmlInvoice(String(purchase_date))
+  return d.toLocaleDateString("fr-FR")
+}
+
+function formatPurchaseInvoiceDateUi(purchase_date: unknown): string {
+  if (purchase_date == null || purchase_date === "") return "—"
+  const d = new Date(purchase_date as string)
+  if (Number.isNaN(d.getTime())) return String(purchase_date)
+  return d.toLocaleDateString("fr-FR")
+}
+
 export default function PurchasesPage() {
   const [searchTerm, setSearchTerm] = useState("")
   const [purchases, setPurchases] = useState<Purchase[]>([])
@@ -58,7 +134,6 @@ export default function PurchasesPage() {
   const [dateTo, setDateTo] = useState("")
   const [selectedPurchase, setSelectedPurchase] = useState<any>(null)
   const [isNewPurchaseModalOpen, setIsNewPurchaseModalOpen] = useState(false)
-  const [isViewPurchaseModalOpen, setIsViewPurchaseModalOpen] = useState(false)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [isPrintInvoiceModalOpen, setIsPrintInvoiceModalOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -92,579 +167,339 @@ export default function PurchasesPage() {
     setPurchaseItems((prevItems) => prevItems.map(recalculatePurchaseItemRow))
   }, [])
 
-  // Generate Purchase Invoice HTML (totals from aggregatePurchaseDocumentTotals = same rules as the form)
+  // Generate Purchase Invoice HTML — same math as the form (preparePurchaseForInvoiceDocument)
   const generatePurchaseInvoiceHTML = (purchase: any) => {
-    const items = purchase.items ?? []
-    const agg = aggregatePurchaseDocumentTotals(items)
-    const totalGeneral =
-      items.length > 0 ? agg.totalSum : round2(parseMoney(purchase.total_amount))
+    const doc = preparePurchaseForInvoiceDocument(purchase)
+    const items = doc.items
+    const agg = doc._agg
+    const totalGeneral = doc._totalGeneral
+
+    const rowsHtml =
+      items.length > 0
+        ? items
+            .map((item: any, index: number) => {
+              const line = computePurchaseLine({
+                quantity: item.quantity,
+                unit_price: item.unit_price,
+                labor_cost: item.additional_price,
+                avance: item.avance,
+              })
+              const laborCost = round2(parseMoney(item.additional_price))
+              const unitPrice = parseMoney(item.unit_price)
+              const qtyStr =
+                item.quantity != null && item.quantity !== ""
+                  ? escapeHtmlInvoice(String(item.quantity))
+                  : "—"
+              return `
+                      <tr class="invoice-row">
+                        <td class="col-idx">${index + 1}</td>
+                        <td class="col-desc">${escapeHtmlInvoice(item.designation || "Article")}</td>
+                        <td class="num">${qtyStr}</td>
+                        <td class="num">${unitPrice.toFixed(2)}</td>
+                        <td class="num">${line.baseAmount.toFixed(2)}</td>
+                        <td class="num labor">${laborCost.toFixed(2)}</td>
+                        <td class="num strong">${line.total.toFixed(2)}</td>
+                        <td class="num">${parseMoney(item.avance).toFixed(2)}</td>
+                        <td class="num reste">${line.reste.toFixed(2)}</td>
+                      </tr>`
+            })
+            .join("")
+        : '<tr><td colspan="9" class="empty-row">Aucun article</td></tr>'
+
+    const recapHtml =
+      items.length > 0
+        ? `
+            <div class="section-title">Récapitulatif des montants</div>
+            <table class="recap-table" aria-label="Totaux">
+              <tbody>
+                <tr><td>Total montant base (produits)</td><td>${agg.baseSum.toFixed(2)} DH</td></tr>
+                <tr><td>Total main d'œuvre</td><td>${agg.laborSum.toFixed(2)} DH</td></tr>
+                <tr class="recap-highlight"><td>Total général</td><td>${totalGeneral.toFixed(2)} DH</td></tr>
+                <tr><td>Total avances</td><td>${agg.avanceSum.toFixed(2)} DH</td></tr>
+                <tr><td>Total reste à payer</td><td>${agg.resteSum.toFixed(2)} DH</td></tr>
+              </tbody>
+            </table>`
+        : ""
+
     return `
       <!DOCTYPE html>
       <html lang="fr" dir="ltr">
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Facture d'Achat #${purchase.id}</title>
+        <title>Facture d'Achat #${doc.id}</title>
         <style>
-          * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body {
+            font-family: 'Segoe UI', Tahoma, Arial, 'Noto Sans Arabic', sans-serif;
+            background: #fff;
+            color: #1e293b;
+            line-height: 1.35;
+            direction: ltr;
+            padding: 12px;
+            font-size: 11px;
           }
-          
-        body {
-          font-family: 'Segoe UI', 'Tahoma', 'Arial', 'Noto Sans Arabic', 'Amiri', sans-serif;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          min-height: 100vh;
-          padding: 10px;
-          color: #2d3748;
-          line-height: 1.4;
-          direction: ltr;
-        }
-        
-        .arabic-text {
-          font-family: 'Noto Sans Arabic', 'Amiri', 'Segoe UI', sans-serif;
-          direction: rtl;
-          text-align: right;
-          unicode-bidi: bidi-override;
-        }
-          
+          .arabic-text {
+            font-family: 'Noto Sans Arabic', 'Segoe UI', sans-serif;
+            direction: rtl;
+            unicode-bidi: embed;
+          }
           .invoice-wrapper {
-            max-width: 800px;
+            max-width: 720px;
             margin: 0 auto;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-            overflow: hidden;
-            position: relative;
+            background: #fff;
+            border: 1px solid #e2e8f0;
           }
-          
-          .invoice-wrapper::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 4px;
-            background: linear-gradient(90deg, #059669, #10b981, #34d399);
-          }
-          
           .invoice-header {
-            background: linear-gradient(135deg, #047857 0%, #059669 50%, #10b981 100%);
-            color: white;
-            padding: 20px;
+            background: #047857;
+            color: #fff;
+            padding: 16px 20px;
             text-align: center;
             position: relative;
-            overflow: hidden;
           }
-          
-          .invoice-title {
-            font-size: 28px;
-            font-weight: 800;
-            margin: 0 0 8px 0;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-          }
-          
-          .invoice-subtitle {
-            font-size: 16px;
-            opacity: 0.95;
-            margin: 0;
-          }
-          
           .invoice-number {
             position: absolute;
-            top: 20px;
-            right: 20px;
-            background: rgba(255,255,255,0.2);
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 14px;
-            backdrop-filter: blur(10px);
+            top: 12px;
+            right: 16px;
+            font-weight: 700;
+            font-size: 12px;
+            opacity: 0.95;
           }
-          
+          .invoice-title { font-size: 20px; font-weight: 800; margin-bottom: 4px; }
+          .invoice-subtitle { font-size: 12px; opacity: 0.92; }
           .invoice-details {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            padding: 20px;
+            gap: 12px 20px;
+            padding: 16px 20px;
             background: #f8fafc;
             border-bottom: 1px solid #e2e8f0;
           }
-          
-          .detail-section {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
+          .detail-section { display: flex; flex-direction: column; gap: 10px; }
+          .detail-full { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 16px 24px; padding-top: 4px; border-top: 1px solid #e2e8f0; }
+          .detail-item { display: flex; flex-direction: column; gap: 4px; min-width: 140px; flex: 1; }
+          .detail-label { font-size: 9px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+          .detail-value { font-size: 13px; font-weight: 600; color: #0f172a; }
+          .invoice-content { padding: 16px 20px 20px; }
+          .section-title {
+            font-size: 10px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.08em;
+            margin: 14px 0 6px;
           }
-          
-          .detail-item {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-          }
-          
-          .detail-label {
-            font-size: 12px;
-            color: #64748b;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-          }
-          
-          .detail-value {
-            font-size: 18px;
-            font-weight: 600;
-            color: #1e293b;
-            padding: 8px 0;
-            border-bottom: 2px solid #e2e8f0;
-          }
-          
-          .invoice-content {
-            padding: 20px;
-          }
-          
           .invoice-table {
             width: 100%;
             border-collapse: collapse;
-            margin: 15px 0;
-            background: white;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+            table-layout: fixed;
+            font-size: 9px;
+            margin-top: 4px;
           }
-          
-          .invoice-table thead {
-            background: linear-gradient(135deg, #047857, #059669);
-            color: white;
+          .invoice-table th, .invoice-table td {
+            border: 1px solid #cbd5e1;
+            padding: 5px 4px;
+            vertical-align: top;
+            word-wrap: break-word;
           }
-          
-          .invoice-table th {
-            padding: 8px 6px;
-            text-align: center;
+          .invoice-table thead th {
+            background: #047857;
+            color: #fff;
             font-weight: 700;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          
-          .invoice-table td {
-            padding: 8px 6px;
             text-align: center;
-            border-bottom: 1px solid #f1f5f9;
-            font-size: 12px;
           }
-          
+          .col-idx { width: 22px; text-align: center; }
+          .col-desc { text-align: left; }
+          .num { text-align: right; font-variant-numeric: tabular-nums; }
+          .num.labor { color: #c2410c; font-weight: 600; }
+          .num.strong { font-weight: 800; }
+          .num.reste { font-weight: 700; color: #15803d; }
+          .empty-row { text-align: center; padding: 28px; color: #64748b; }
+          .invoice-row { page-break-inside: avoid; }
+          thead { display: table-header-group; }
+          .recap-table {
+            width: 100%;
+            max-width: 320px;
+            margin-left: auto;
+            border-collapse: collapse;
+            font-size: 10px;
+          }
+          .recap-table td {
+            border: 1px solid #e2e8f0;
+            padding: 7px 10px;
+          }
+          .recap-table td:first-child { font-weight: 600; color: #334155; }
+          .recap-table td:last-child {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            font-weight: 700;
+          }
+          .recap-highlight td { background: #ecfdf5; font-size: 11px; }
           .invoice-total {
-            margin: 15px 0;
-            padding: 15px;
-            background: linear-gradient(135deg, #047857, #059669);
-            color: white;
-            border-radius: 8px;
+            margin: 14px 0;
+            padding: 12px 16px;
+            background: #047857;
+            color: #fff;
+            border-radius: 6px;
             text-align: center;
-            box-shadow: 0 4px 12px -3px rgba(4, 120, 87, 0.3);
           }
-          
-          .total-label {
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 4px;
-            opacity: 0.9;
-          }
-          
-          .total-amount {
-            font-size: 24px;
-            font-weight: 800;
-            margin: 0;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-          }
-          
+          .total-label { font-size: 11px; font-weight: 600; opacity: 0.95; margin-bottom: 2px; }
+          .total-amount { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
           .payment-details {
-            margin: 15px 0;
-            padding: 15px;
+            margin-top: 12px;
+            padding: 14px;
             background: #f8fafc;
             border: 1px solid #e2e8f0;
-            border-radius: 8px;
+            border-radius: 6px;
           }
-          
-          .payment-title {
-            font-size: 14px;
-            font-weight: 700;
-            color: #374151;
-            margin-bottom: 10px;
-            text-align: center;
-          }
-          
-          .payment-info {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-bottom: 10px;
-          }
-          
+          .payment-title { font-size: 11px; font-weight: 700; color: #374151; margin-bottom: 8px; text-align: center; }
+          .payment-info { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
           .payment-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 6px 0;
+            gap: 8px;
+            padding: 5px 0;
             border-bottom: 1px solid #e2e8f0;
+            font-size: 10px;
           }
-          
-          .payment-label {
-            font-weight: 600;
-            color: #64748b;
+          .payment-label { font-weight: 600; color: #64748b; }
+          .payment-value { font-weight: 700; color: #0f172a; text-align: right; font-variant-numeric: tabular-nums; }
+          .notes-box {
+            margin-top: 12px;
+            padding: 10px 12px;
+            background: #fefce8;
+            border: 1px solid #facc15;
+            border-radius: 6px;
           }
-          
-          .payment-value {
-            font-weight: 700;
-            color: #1e293b;
-          }
-          
+          .notes-title { font-size: 11px; font-weight: 700; color: #a16207; margin-bottom: 4px; }
+          .notes-body { color: #854d0e; font-size: 10px; white-space: pre-wrap; }
           .footer {
             background: #1e293b;
-            color: white;
-            padding: 15px;
+            color: #fff;
+            padding: 12px;
             text-align: center;
+            font-size: 10px;
           }
-          
-          .footer-title {
-            font-size: 14px;
-            font-weight: 700;
-            margin-bottom: 5px;
-          }
-          
-          .footer-subtitle {
-            font-size: 12px;
-            opacity: 0.8;
-            margin-bottom: 8px;
-          }
-          
-          .footer-info {
-            font-size: 12px;
-            opacity: 0.7;
-          }
-          
-          .costs-breakdown {
-            margin: 15px 0;
-            padding: 15px;
-            background: linear-gradient(135deg, #f0f9ff, #e0f2fe);
-            border: 2px solid #0ea5e9;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px -1px rgba(14, 165, 233, 0.1);
-          }
-          
-          .costs-title {
-            font-size: 16px;
-            font-weight: 700;
-            color: #0c4a6e;
-            margin-bottom: 10px;
-            text-align: center;
-          }
-          
-          .costs-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-          }
-          
-          .cost-item {
-            padding: 10px;
-            border-radius: 6px;
-            text-align: center;
-            transition: transform 0.2s ease;
-          }
-          
-          .cost-item:hover {
-            transform: translateY(-2px);
-          }
-          
-          .cost-item.products {
-            background: linear-gradient(135deg, #dbeafe, #bfdbfe);
-            border: 2px solid #3b82f6;
-          }
-          
-          .cost-item.labor {
-            background: linear-gradient(135deg, #fef3c7, #fde68a);
-            border: 2px solid #f59e0b;
-          }
-          
-          .cost-label {
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 8px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          
-          .cost-label.products {
-            color: #1e40af;
-          }
-          
-          .cost-label.labor {
-            color: #92400e;
-          }
-          
-          .cost-amount {
-            font-size: 18px;
-            font-weight: 800;
-            margin: 0;
-          }
-          
-          .cost-amount.products {
-            color: #1e40af;
-          }
-          
-          .cost-amount.labor {
-            color: #92400e;
-          }
-          
-          .labor-summary {
-            margin: 10px 0;
-            padding: 10px;
-            background: linear-gradient(135deg, #fef3c7, #fde68a);
-            border: 2px solid #f59e0b;
-            border-radius: 8px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 4px -1px rgba(245, 158, 11, 0.2);
-          }
-          
-          .labor-summary-label {
-            font-size: 14px;
-            font-weight: 700;
-            color: #92400e;
-          }
-          
-          .labor-summary-amount {
-            font-size: 20px;
-            font-weight: 800;
-            color: #92400e;
+          @media print {
+            @page { margin: 10mm; size: A4 portrait; }
+            body { padding: 0; }
+            .invoice-wrapper { border: none; max-width: none; }
           }
         </style>
       </head>
       <body>
         <div class="invoice-wrapper">
           <div class="invoice-header">
-            <div class="invoice-number">#${purchase.id}</div>
+            <div class="invoice-number">#${doc.id}</div>
             <div class="invoice-title">FACTURE D'ACHAT / <span class="arabic-text">فاتورة الشراء</span></div>
             <div class="invoice-subtitle">Gestion Droguerie - Système de Gestion de Stock</div>
           </div>
-          
+
           <div class="invoice-details">
             <div class="detail-section">
               <div class="detail-item">
                 <div class="detail-label">N° Facture / <span class="arabic-text">رقم الفاتورة</span></div>
-                <div class="detail-value">${escapeHtmlInvoice(purchase.invoice_number || "#" + purchase.id)}</div>
+                <div class="detail-value">${escapeHtmlInvoice(doc.invoice_number || "#" + doc.id)}</div>
               </div>
               <div class="detail-item">
                 <div class="detail-label">Date / <span class="arabic-text">التاريخ</span></div>
-                <div class="detail-value">${new Date(purchase.purchase_date).toLocaleDateString('fr-FR')}</div>
+                <div class="detail-value">${formatPurchaseInvoiceDate(doc.purchase_date)}</div>
               </div>
             </div>
             <div class="detail-section">
               <div class="detail-item">
                 <div class="detail-label">Fournisseur / <span class="arabic-text">المورد</span></div>
-                <div class="detail-value">${escapeHtmlInvoice(purchase.supplier_name || "Non spécifié")}</div>
+                <div class="detail-value">${escapeHtmlInvoice(doc.supplier_name || "Non spécifié")}</div>
               </div>
               <div class="detail-item">
                 <div class="detail-label">Statut / <span class="arabic-text">الحالة</span></div>
-                <div class="detail-value">${purchase.status === 'completed' ? 'Terminé' : purchase.status === 'pending' ? 'En attente' : 'Annulé'}</div>
+                <div class="detail-value">${doc.status === "completed" ? "Terminé" : doc.status === "pending" ? "En attente" : "Annulé"}</div>
+              </div>
+            </div>
+            <div class="detail-full">
+              <div class="detail-item">
+                <div class="detail-label">Méthode de paiement / <span class="arabic-text">طريقة الدفع</span></div>
+                <div class="detail-value">${paymentMethodLabelHtml(doc.payment_method)}</div>
+              </div>
+              <div class="detail-item">
+                <div class="detail-label">Nombre d&apos;articles</div>
+                <div class="detail-value">${items.length}</div>
               </div>
             </div>
           </div>
-          
+
           <div class="invoice-content">
+            <div class="section-title">Articles</div>
             <table class="invoice-table">
               <thead>
                 <tr>
-                  <th>N° / <span class="arabic-text">رقم</span></th>
-                  <th>Désignation / <span class="arabic-text">البيان</span></th>
-                  <th>Quantité / <span class="arabic-text">الكمية</span></th>
-                  <th>Prix Unitaire / <span class="arabic-text">السعر</span> (DH)</th>
-                  <th>Main d'œuvre / <span class="arabic-text">العمالة</span> (DH)</th>
-                  <th>Total / <span class="arabic-text">المجموع</span> (DH)</th>
-                  <th>Avance / <span class="arabic-text">تسبيق</span></th>
-                  <th>Reste / <span class="arabic-text">الباقي</span></th>
+                  <th class="col-idx">N°</th>
+                  <th>Désignation</th>
+                  <th>Qté</th>
+                  <th>P.U. (DH)</th>
+                  <th>Base (DH)</th>
+                  <th>M.o. (DH)</th>
+                  <th>Total (DH)</th>
+                  <th>Avance</th>
+                  <th>Reste</th>
                 </tr>
               </thead>
               <tbody>
-                ${purchase.items && purchase.items.length > 0 ? 
-                  purchase.items.map((item: any, index: number) => {
-                    const line = computePurchaseLine({
-                      quantity: item.quantity,
-                      unit_price: item.unit_price,
-                      labor_cost: item.additional_price,
-                      avance: item.avance,
-                    })
-                    const laborCost = round2(parseMoney(item.additional_price))
-                    const unitPrice = parseMoney(item.unit_price)
-                    
-                    return `
-                      <tr>
-                        <td>${index + 1}</td>
-                        <td style="text-align: left; font-weight: 600;">${escapeHtmlInvoice(item.designation || "Article")}</td>
-                        <td>${item.quantity}</td>
-                        <td>${unitPrice.toFixed(2)}</td>
-                        <td style="color: #059669; font-weight: 600;">${laborCost.toFixed(2)}</td>
-                        <td style="font-weight: 700;">${line.total.toFixed(2)}</td>
-                        <td>${parseMoney(item.avance).toFixed(2)}</td>
-                        <td style="font-weight: 600;">${line.reste.toFixed(2)}</td>
-                      </tr>
-                    `
-                  }).join('') : 
-                  '<tr><td colspan="8" style="text-align: center; padding: 40px; color: #64748b;">Aucun article</td></tr>'
-                }
+                ${rowsHtml}
               </tbody>
             </table>
-            
-            ${
-              agg.laborSum > 0
-                ? `
-                  <div class="costs-breakdown">
-                    <div class="costs-title">Détail des Coûts / <span class="arabic-text">تفاصيل التكاليف</span></div>
-                    <div class="costs-grid">
-                      <div class="cost-item products">
-                        <div class="cost-label products">Produits (base) / <span class="arabic-text">المنتجات</span></div>
-                        <div class="cost-amount products">${agg.baseSum.toFixed(2)} DH</div>
-                      </div>
-                      <div class="cost-item labor">
-                        <div class="cost-label labor">Main d'œuvre / <span class="arabic-text">العمالة</span></div>
-                        <div class="cost-amount labor">${agg.laborSum.toFixed(2)} DH</div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div class="labor-summary">
-                    <div class="labor-summary-label">Main d'œuvre / <span class="arabic-text">العمالة</span>:</div>
-                    <div class="labor-summary-amount">${agg.laborSum.toFixed(2)} DH</div>
-                  </div>
-                `
-                : ""
-            }
-            
+
+            ${recapHtml}
+
             <div class="invoice-total">
-              <div class="total-label">Total Général / <span class="arabic-text">المجموع العام</span></div>
+              <div class="total-label">Total général / <span class="arabic-text">المجموع العام</span></div>
               <div class="total-amount">${totalGeneral.toFixed(2)} DH</div>
             </div>
-            
+
             <div class="payment-details">
-              <div class="payment-title">Détails de l'Achat / <span class="arabic-text">تفاصيل الشراء</span></div>
+              <div class="payment-title">Synthèse / <span class="arabic-text">ملخص</span></div>
               <div class="payment-info">
                 <div class="payment-item">
-                  <div class="payment-label">Méthode de Paiement / <span class="arabic-text">طريقة الدفع</span>:</div>
-                  <div class="payment-value">${
-                    purchase.payment_method === 'cash' ? 'Espèces / <span class="arabic-text">نقداً</span>' : 
-                    purchase.payment_method === 'credit' ? 'Crédit / <span class="arabic-text">ائتمان</span>' : 
-                    purchase.payment_method === 'card' ? 'Carte / <span class="arabic-text">بطاقة</span>' :
-                    purchase.payment_method === 'transfer' ? 'Virement / <span class="arabic-text">تحويل</span>' :
-                    purchase.payment_method === 'check' ? 'Chèque / <span class="arabic-text">شيك</span>' :
-                    purchase.payment_method
-                  }</div>
+                  <span class="payment-label">Méthode de paiement</span>
+                  <span class="payment-value">${paymentMethodLabelHtml(doc.payment_method)}</span>
                 </div>
                 <div class="payment-item">
-                  <div class="payment-label">Nombre d'Articles / <span class="arabic-text">عدد المواد</span>:</div>
-                  <div class="payment-value">${purchase.items?.length || 0}</div>
+                  <span class="payment-label">Articles</span>
+                  <span class="payment-value">${items.length}</span>
                 </div>
                 ${
                   items.length > 0
                     ? `
                 <div class="payment-item">
-                  <div class="payment-label">Total avances / <span class="arabic-text">مجموع التسبيق</span></div>
-                  <div class="payment-value">${agg.avanceSum.toFixed(2)} DH</div>
+                  <span class="payment-label">Total avances</span>
+                  <span class="payment-value">${agg.avanceSum.toFixed(2)} DH</span>
                 </div>
                 <div class="payment-item">
-                  <div class="payment-label">Total reste à payer / <span class="arabic-text">المتبقي</span></div>
-                  <div class="payment-value">${agg.resteSum.toFixed(2)} DH</div>
-                </div>
-                `
+                  <span class="payment-label">Total reste à payer</span>
+                  <span class="payment-value">${agg.resteSum.toFixed(2)} DH</span>
+                </div>`
                     : ""
                 }
               </div>
-              
-              ${purchase.notes ? `
-                <div style="margin-top: 15px; padding: 10px; background: #fefce8; border: 1px solid #facc15; border-radius: 8px;">
-                  <div style="font-size: 14px; font-weight: 700; color: #a16207; margin-bottom: 5px;">Notes / <span class="arabic-text">ملاحظات</span></div>
-                  <div style="color: #a16207; font-style: italic;">${escapeHtmlInvoice(purchase.notes)}</div>
-                </div>
-              ` : ''}
+              ${
+                doc.notes
+                  ? `
+              <div class="notes-box">
+                <div class="notes-title">Notes / <span class="arabic-text">ملاحظات</span></div>
+                <div class="notes-body">${escapeHtmlInvoice(doc.notes)}</div>
+              </div>`
+                  : ""
+              }
             </div>
           </div>
-          
+
           <div class="footer">
-            <div class="footer-title">Merci pour votre confiance / <span class="arabic-text">شكراً لتفتكم</span></div>
-            <div class="footer-subtitle">Gestion Droguerie - Système de Gestion de Stock</div>
-            <div class="footer-info">
-              Généré le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR')}
-            </div>
+            <div>Merci pour votre confiance / <span class="arabic-text">شكراً لتفتكم</span></div>
+            <div style="opacity:0.85;margin-top:4px;">Gestion Droguerie</div>
+            <div style="opacity:0.75;margin-top:6px;">Généré le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}</div>
           </div>
         </div>
       </body>
       </html>
     `;
   };
-
-  // PDF Export function for individual purchase
-  const exportPurchaseToPDF = async (purchase: any) => {
-    // Check if we're in the browser
-    if (typeof window === 'undefined') {
-      toast.error("Export PDF non disponible côté serveur")
-      return
-    }
-
-    try {
-      let purchaseForPdf = purchase
-      try {
-        const res = await fetch(`/api/purchases/${purchase.id}`)
-        if (res.ok) {
-          purchaseForPdf = await safeJsonParse(res)
-        } else {
-          const err = await res.json().catch(() => ({}))
-          console.warn("Facture: impossible de recharger l'achat, données du tableau utilisées", err)
-        }
-      } catch {
-        console.warn("Facture: erreur réseau, données du tableau utilisées")
-      }
-
-      const invoiceHTML = generatePurchaseInvoiceHTML(purchaseForPdf)
-
-      // html2pdf captures a real DOM tree; a string alone can render incomplete — use a hidden iframe
-      const iframe = document.createElement("iframe")
-      iframe.setAttribute("aria-hidden", "true")
-      iframe.style.cssText =
-        "position:fixed;left:-10000px;top:0;width:816px;min-height:1200px;border:none;background:#fff;"
-      document.body.appendChild(iframe)
-      const idoc = iframe.contentDocument!
-      idoc.open()
-      idoc.write(invoiceHTML)
-      idoc.close()
-      await new Promise<void>((r) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => r())),
-      )
-
-      try {
-        const html2pdf = (await import("html2pdf.js")).default
-        const opt = {
-          margin: 0.5,
-          filename: `facture-achat-${purchase.id}-${new Date().toISOString().split("T")[0]}.pdf`,
-          image: { type: "jpeg" as const, quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true },
-          jsPDF: { unit: "in", format: "a4", orientation: "portrait" as const },
-        }
-        await html2pdf().set(opt).from(idoc.body).save()
-        toast.success("Facture exportée avec succès")
-      } finally {
-        document.body.removeChild(iframe)
-      }
-    } catch (error) {
-      console.error('Error exporting PDF:', error)
-      toast.error("Erreur lors de l'export PDF")
-    }
-  }
-
-
-
-
 
   useEffect(() => {
     async function fetchData() {
@@ -756,6 +591,11 @@ export default function PurchasesPage() {
       return matchesSearch && matchesStatus && matchesPayment && matchesDate
     })
   }, [purchases, searchNeedle, statusFilter, paymentFilter, dateFrom, dateTo])
+
+  const invoicePreviewDoc = useMemo(
+    () => (selectedPurchase ? preparePurchaseForInvoiceDocument(selectedPurchase) : null),
+    [selectedPurchase],
+  )
 
   // Calculate summary data
   const totalPurchases = filteredPurchases.length
@@ -849,9 +689,19 @@ export default function PurchasesPage() {
     setIsNewPurchaseModalOpen(true)
   }
 
-  const handleViewPurchase = (purchase: any) => {
-    setSelectedPurchase(purchase)
-    setIsViewPurchaseModalOpen(true)
+  const handleViewPurchase = async (purchase: any) => {
+    try {
+      const res = await fetch(`/api/purchases/${purchase.id}`)
+      if (res.ok) {
+        const data = await safeJsonParse(res)
+        setSelectedPurchase(data)
+      } else {
+        setSelectedPurchase(purchase)
+      }
+    } catch {
+      setSelectedPurchase(purchase)
+    }
+    setIsPrintInvoiceModalOpen(true)
   }
 
   const handleEditPurchase = (purchase: any) => {
@@ -909,43 +759,52 @@ export default function PurchasesPage() {
   }
 
 
-  // Print dialog: same HTML as téléchargement PDF (fetch + generatePurchaseInvoiceHTML)
+  // Print dialog: fetch full purchase + generatePurchaseInvoiceHTML
   const handleNewExportPDF = async () => {
     if (!selectedPurchase) return
-    
+
     try {
-      toast.loading('Génération du PDF en cours...', { id: 'pdf-export' })
+      toast.loading("Génération du PDF en cours...", { id: "pdf-export" })
 
       let purchaseForPrint = selectedPurchase
       try {
         const res = await fetch(`/api/purchases/${selectedPurchase.id}`)
         if (res.ok) {
           purchaseForPrint = await safeJsonParse(res)
+          setSelectedPurchase(purchaseForPrint)
         }
       } catch {
         /* use modal snapshot */
       }
 
-      const printWindow = window.open('', '_blank')
+      const docForLog = preparePurchaseForInvoiceDocument(purchaseForPrint)
+      console.log("[Facture achat export impression]", {
+        purchaseId: docForLog.id,
+        invoice_number: docForLog.invoice_number,
+        itemsCount: docForLog.items.length,
+        aggregate: docForLog._agg,
+        totalGeneral: docForLog._totalGeneral,
+      })
+
+      const printWindow = window.open("", "_blank")
       if (!printWindow) {
-        throw new Error('Popup blocked')
+        throw new Error("Popup blocked")
       }
 
       const invoiceHTML = generatePurchaseInvoiceHTML(purchaseForPrint)
-      
+
       printWindow.document.write(invoiceHTML)
       printWindow.document.close()
-      
+
       setTimeout(() => {
         printWindow.focus()
         printWindow.print()
         printWindow.close()
-        toast.success('PDF généré avec succès!', { id: 'pdf-export' })
-      }, 1000)
-      
+        toast.success("PDF généré avec succès!", { id: "pdf-export" })
+      }, 800)
     } catch (error) {
-      console.error('Error generating PDF:', error)
-      toast.error('Erreur lors de la génération du PDF', { id: 'pdf-export' })
+      console.error("Error generating PDF:", error)
+      toast.error("Erreur lors de la génération du PDF", { id: "pdf-export" })
     }
   }
 
@@ -1268,14 +1127,6 @@ export default function PurchasesPage() {
                             className="p-2 hover:bg-gray-100"
                         >
                             <Edit className="w-4 h-4 text-gray-600" />
-                        </Button>
-                        <Button 
-                            variant="ghost"
-                          size="sm"
-                          onClick={() => exportPurchaseToPDF(purchase)}
-                            className="p-2 hover:bg-gray-100"
-                        >
-                            <Download className="w-4 h-4 text-blue-600" />
                         </Button>
                           <Button 
                             variant="ghost"
@@ -1834,54 +1685,6 @@ export default function PurchasesPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Simple View Modal */}
-      <Dialog open={isViewPurchaseModalOpen} onOpenChange={setIsViewPurchaseModalOpen}>
-        <DialogContent className="max-w-4xl">
-          <DialogHeader>
-            <DialogTitle>Détails de l&apos;Achat</DialogTitle>
-          </DialogHeader>
-          {selectedPurchase && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <Label className="text-sm font-medium text-gray-600">N° Facture</Label>
-                  <p className="text-lg font-semibold">{selectedPurchase.invoice_number || '#' + selectedPurchase.id}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium text-gray-600">Fournisseur</Label>
-                  <p className="text-lg font-semibold">{selectedPurchase.supplier_name}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium text-gray-600">Date</Label>
-                  <p className="text-lg">{new Date(selectedPurchase.purchase_date).toLocaleDateString('fr-FR')}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium text-gray-600">Montant Total</Label>
-                  <p className="text-lg font-semibold text-green-600">{selectedPurchase.total_amount} DH</p>
-                </div>
-                </div>
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button
-                  variant="outline"
-                  onClick={() => setIsViewPurchaseModalOpen(false)}
-                >
-                  Fermer
-                </Button>
-                <Button
-                  onClick={() => {
-                    setIsViewPurchaseModalOpen(false)
-                    handleEditPurchase(selectedPurchase)
-                  }}
-                  className="bg-blue-600 hover:bg-blue-700"
-                >
-                  Modifier
-                </Button>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
       {/* Delete Confirmation Modal */}
       <Dialog open={isDeleteModalOpen} onOpenChange={setIsDeleteModalOpen}>
         <DialogContent>
@@ -2026,21 +1829,30 @@ export default function PurchasesPage() {
             }
           `}</style>
           <DialogHeader className="print:hidden">
-            <DialogTitle className="flex items-center justify-between">
+            <DialogTitle className="flex items-center justify-between gap-2 flex-wrap">
               <span>Facture d&apos;Achat / فاتورة الشراء</span>
-              <Button
-                onClick={handleNewExportPDF}
-                className="bg-blue-600 hover:bg-blue-700 text-white"
-              >
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Export PDF
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setIsPrintInvoiceModalOpen(false)
+                    if (selectedPurchase) handleEditPurchase(selectedPurchase)
+                  }}
+                >
+                  Modifier
+                </Button>
+                <Button onClick={handleNewExportPDF} className="bg-blue-600 hover:bg-blue-700 text-white">
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Export PDF
+                </Button>
+              </div>
             </DialogTitle>
           </DialogHeader>
-          
-                    {selectedPurchase && (
+
+          {invoicePreviewDoc && selectedPurchase && (
             <div className="max-w-4xl mx-auto p-6 print-invoice">
               {/* Print Styles */}
               <style>{`
@@ -2220,117 +2032,164 @@ export default function PurchasesPage() {
                   }
                 }
               `}</style>
-              {/* Ultra Compact Header */}
-              <div className="text-center mb-2">
-                <h1 className="text-lg font-bold text-gray-800">FACTURE D'ACHAT</h1>
-                <p className="text-sm text-gray-600">Gestion Droguerie</p>
+              <div className="text-center mb-3">
+                <h1 className="text-lg font-bold text-gray-800">FACTURE D&apos;ACHAT</h1>
+                <p className="text-sm text-gray-600">Gestion Droguerie · #{invoicePreviewDoc.id}</p>
               </div>
 
-              {/* Invoice Info - Ultra Compact */}
-              <div className="mb-2 p-2 bg-gray-50 rounded text-xs">
-                <div className="grid grid-cols-4 gap-2">
-                  <div><span className="text-gray-600">N°:</span> {selectedPurchase.invoice_number}</div>
-                  <div><span className="text-gray-600">Date:</span> {new Date(selectedPurchase.purchase_date).toLocaleDateString('fr-FR')}</div>
-                  <div><span className="text-gray-600">Fournisseur:</span> {selectedPurchase.supplier_name}</div>
-                  <div><span className="text-gray-600">Paiement:</span> {
-                    selectedPurchase.payment_method === 'cash' ? 'Espèces' : 
-                    selectedPurchase.payment_method === 'card' ? 'Carte' :
-                    selectedPurchase.payment_method === 'transfer' ? 'Virement' :
-                    selectedPurchase.payment_method === 'check' ? 'Chèque' : selectedPurchase.payment_method
-                  }</div>
+              <div className="mb-3 p-3 bg-gray-50 rounded-md text-xs space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-gray-500 font-medium">N° Facture</p>
+                    <p className="font-semibold text-gray-900">
+                      {invoicePreviewDoc.invoice_number || `#${invoicePreviewDoc.id}`}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500 font-medium">Date</p>
+                    <p className="font-semibold text-gray-900">
+                      {formatPurchaseInvoiceDateUi(invoicePreviewDoc.purchase_date)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500 font-medium">Fournisseur</p>
+                    <p className="font-semibold text-gray-900">{invoicePreviewDoc.supplier_name || "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500 font-medium">Méthode de paiement</p>
+                    <p className="font-semibold text-gray-900">
+                      {paymentMethodLabelText(invoicePreviewDoc.payment_method)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500 font-medium">Statut</p>
+                    <p className="font-semibold text-gray-900">
+                      {invoicePreviewDoc.status === "completed"
+                        ? "Terminé"
+                        : invoicePreviewDoc.status === "pending"
+                          ? "En attente"
+                          : "Annulé"}
+                    </p>
+                  </div>
                 </div>
               </div>
 
-              {/* Ultra Compact Items Table */}
-              <div className="mb-2">
-                <h2 className="text-sm font-bold text-gray-800 mb-1">Articles</h2>
-                <table className="w-full border-collapse text-xs">
+              <h2 className="text-sm font-bold text-gray-800 mb-1">Articles</h2>
+              <div className="mb-3 overflow-x-auto">
+                <table className="w-full border-collapse text-xs min-w-[720px]">
                   <thead>
-                    <tr className="bg-gray-100">
-                      <th className="border border-gray-300 px-1 py-0.5 text-left font-semibold">Article</th>
-                      <th className="border border-gray-300 px-1 py-0.5 text-center font-semibold">Qté</th>
-                      <th className="border border-gray-300 px-1 py-0.5 text-center font-semibold">Prix</th>
-                      <th className="border border-gray-300 px-1 py-0.5 text-center font-semibold">Total</th>
+                    <tr className="bg-emerald-800 text-white">
+                      <th className="border border-gray-300 px-1 py-1 text-center font-semibold w-8">N°</th>
+                      <th className="border border-gray-300 px-1 py-1 text-left font-semibold">Désignation</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">Qté</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">P.U. (DH)</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">Base (DH)</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">M.o. (DH)</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">Total (DH)</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">Avance</th>
+                      <th className="border border-gray-300 px-1 py-1 text-right font-semibold">Reste</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {selectedPurchase.items && selectedPurchase.items.length > 0 ? (
-                      selectedPurchase.items.map((item: any, index: number) => {
-                        const { total: lineTotal } = computePurchaseLine({
+                    {invoicePreviewDoc.items.length > 0 ? (
+                      invoicePreviewDoc.items.map((item: any, index: number) => {
+                        const line = computePurchaseLine({
                           quantity: item.quantity,
                           unit_price: item.unit_price,
                           labor_cost: item.additional_price,
                           avance: item.avance,
                         })
                         return (
-                          <tr key={index}>
-                            <td className="border border-gray-300 px-1 py-0.5">{item.designation || 'Produit'}</td>
-                            <td className="border border-gray-300 px-1 py-0.5 text-center">{item.quantity}</td>
-                            <td className="border border-gray-300 px-1 py-0.5 text-center">{parseMoney(item.unit_price).toFixed(2)} DH</td>
-                            <td className="border border-gray-300 px-1 py-0.5 text-center font-semibold">{lineTotal.toFixed(2)} DH</td>
+                          <tr key={item.id ?? index}>
+                            <td className="border border-gray-300 px-1 py-0.5 text-center">{index + 1}</td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-left">
+                              {item.designation || "Article"}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums">
+                              {item.quantity != null && item.quantity !== "" ? String(item.quantity) : "—"}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums">
+                              {parseMoney(item.unit_price).toFixed(2)}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums text-blue-700">
+                              {line.baseAmount.toFixed(2)}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums text-orange-700">
+                              {round2(parseMoney(item.additional_price)).toFixed(2)}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums font-semibold">
+                              {line.total.toFixed(2)}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums">
+                              {parseMoney(item.avance).toFixed(2)}
+                            </td>
+                            <td className="border border-gray-300 px-1 py-0.5 text-right tabular-nums font-semibold text-green-700">
+                              {line.reste.toFixed(2)}
+                            </td>
                           </tr>
                         )
                       })
                     ) : (
                       <tr>
-                        <td colSpan={4} className="border border-gray-300 px-1 py-2 text-center text-gray-500">Aucun article</td>
+                        <td
+                          colSpan={9}
+                          className="border border-gray-300 px-1 py-3 text-center text-gray-500"
+                        >
+                          Aucun article
+                        </td>
                       </tr>
                     )}
                   </tbody>
-                  <tfoot>
-                    <tr className="bg-gray-100 font-bold">
-                      <td colSpan={3} className="border border-gray-300 px-1 py-0.5 text-right">TOTAL:</td>
-                      <td className="border border-gray-300 px-1 py-0.5 text-center">
-                        {round2(
-                          selectedPurchase.items?.reduce((sum: number, item: any) => {
-                            const { total } = computePurchaseLine({
-                              quantity: item.quantity,
-                              unit_price: item.unit_price,
-                              labor_cost: item.additional_price,
-                              avance: item.avance,
-                            })
-                            return sum + total
-                          }, 0) || 0,
-                        ).toFixed(2)}{" "}
-                        DH
-                      </td>
-                    </tr>
-                  </tfoot>
                 </table>
               </div>
 
-              {/* Total Summary - Ultra Compact */}
-              <div className="mb-2 p-2 bg-gray-100 border border-gray-300 rounded text-xs">
-                <div className="flex justify-between items-center">
-                  <span className="font-semibold">TOTAL GÉNÉRAL:</span>
-                  <span className="font-bold text-gray-800">
-                    {round2(
-                      selectedPurchase.items?.reduce((sum: number, item: any) => {
-                        const { total } = computePurchaseLine({
-                          quantity: item.quantity,
-                          unit_price: item.unit_price,
-                          labor_cost: item.additional_price,
-                          avance: item.avance,
-                        })
-                        return sum + total
-                      }, 0) || 0,
-                    ).toFixed(2)}{" "}
-                    DH
-                  </span>
-                </div>
-              </div>
-
-              {/* Notes - Ultra Compact */}
-              {selectedPurchase.notes && (
-                <div className="mb-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
-                  <span className="font-semibold text-gray-800">Notes:</span>
-                  <span className="ml-2 text-gray-700">{selectedPurchase.notes}</span>
+              {invoicePreviewDoc.items.length > 0 && (
+                <div className="mb-3 p-3 bg-slate-50 border border-gray-200 rounded-md text-xs space-y-1 max-w-md ml-auto">
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-600">Total base</span>
+                    <span className="font-semibold tabular-nums">
+                      {invoicePreviewDoc._agg.baseSum.toFixed(2)} DH
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-600">Total main d&apos;œuvre</span>
+                    <span className="font-semibold tabular-nums">
+                      {invoicePreviewDoc._agg.laborSum.toFixed(2)} DH
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4 pt-1 border-t border-gray-300 font-bold">
+                    <span>Total général</span>
+                    <span className="tabular-nums">{invoicePreviewDoc._totalGeneral.toFixed(2)} DH</span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-600">Total avances</span>
+                    <span className="font-semibold tabular-nums">
+                      {invoicePreviewDoc._agg.avanceSum.toFixed(2)} DH
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-gray-600">Total reste à payer</span>
+                    <span className="font-semibold tabular-nums text-green-800">
+                      {invoicePreviewDoc._agg.resteSum.toFixed(2)} DH
+                    </span>
+                  </div>
                 </div>
               )}
 
-              {/* Ultra Compact Footer */}
+              <div className="mb-3 p-3 bg-emerald-800 text-white rounded-md text-center">
+                <p className="text-xs font-medium opacity-90">Total général</p>
+                <p className="text-xl font-bold tabular-nums">{invoicePreviewDoc._totalGeneral.toFixed(2)} DH</p>
+              </div>
+
+              {selectedPurchase.notes && (
+                <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-md text-xs">
+                  <p className="font-semibold text-gray-800 mb-1">Notes</p>
+                  <p className="text-gray-700 whitespace-pre-wrap">{selectedPurchase.notes}</p>
+                </div>
+              )}
+
               <div className="text-center text-xs text-gray-600">
-                Merci pour votre confiance - Gestion Droguerie
+                Merci pour votre confiance · Gestion Droguerie
               </div>
             </div>
           )}

@@ -1,172 +1,171 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { SearchableProductSelect } from "@/components/SearchableProductSelect"
-import { Plus, Trash2, Save, ArrowLeft } from "lucide-react"
+import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-
-interface Product {
-  id: number
-  name: string
-  current_stock: number
-  selling_price: number
-  unit: string
-}
-
-interface Client {
-  id: number
-  name: string
-  phone: string
-}
-
-interface SaleItem {
-  product_id: number
-  product_name: string
-  quantity: number
-  unit_price: number
-  total: number
-  unit: string
-}
+import { ArrowLeft, Plus, Save } from "lucide-react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { SaleLineRow } from "@/components/new-sale-modal/SaleLineRow"
+import { useNewSaleForm, sortedClients } from "@/components/new-sale-modal/useNewSaleForm"
+import type { ClientOption, PaymentMethod, ProductOption } from "@/components/new-sale-modal/types"
+import { parseMoneyInput, round2 } from "@/components/new-sale-modal/money"
 
 export default function NewSalePage() {
   const router = useRouter()
-  const [loading, setLoading] = useState(false)
-  const [products, setProducts] = useState<Product[]>([])
-  const [clients, setClients] = useState<Client[]>([])
-  const [saleItems, setSaleItems] = useState<SaleItem[]>([])
-  const [selectedClient, setSelectedClient] = useState<string>("")
-  const [paymentMethod, setPaymentMethod] = useState<string>("cash")
-  const [notes, setNotes] = useState("")
+  const [loading, setLoading] = React.useState(false)
+  const [products, setProducts] = React.useState<ProductOption[]>([])
+  const [clients, setClients] = React.useState<ClientOption[]>([])
 
-  // Fetch products and clients on component mount
-  useEffect(() => {
+  React.useEffect(() => {
     const fetchData = async () => {
       try {
-        const [productsResponse, clientsResponse] = await Promise.all([
-          fetch('/api/products'),
-          fetch('/api/clients')
-        ])
-        
-        if (productsResponse.ok) {
-          const productsData = await productsResponse.json()
-          setProducts(productsData)
-        }
-        
+        const [productsResponse, clientsResponse] = await Promise.all([fetch("/api/products"), fetch("/api/clients")])
+
+        if (productsResponse.ok) setProducts(await productsResponse.json())
         if (clientsResponse.ok) {
-          const clientsData = await clientsResponse.json()
-          setClients(clientsData)
+          const data = await clientsResponse.json()
+          setClients(data)
         }
-      } catch (error) {
-        console.error('Error fetching data:', error)
+      } catch {
         toast.error("Erreur lors du chargement des données")
       }
     }
-
-    fetchData()
+    void fetchData()
   }, [])
 
-  // Add new sale item
-  const addSaleItem = () => {
-    const newItem: SaleItem = {
-      product_id: 0,
-      product_name: "",
-      quantity: 1,
-      unit_price: 0,
-      total: 0,
-      unit: ""
-    }
-    setSaleItems([...saleItems, newItem])
+  const {
+    clientId,
+    setClientId,
+    paymentMethod,
+    setPaymentMethod,
+    cashStr,
+    setCashStr,
+    creditStr,
+    setCreditStr,
+    notes,
+    setNotes,
+    lines,
+    addLine,
+    removeLine,
+    updateLine,
+    selectProduct,
+    grandTotal,
+    buildSaveItems,
+  } = useNewSaleForm({ open: true, products, resetOnOpen: false })
+
+  const clientsSorted = React.useMemo(() => sortedClients(clients), [clients])
+
+  const cashStrRef = React.useRef(cashStr)
+  cashStrRef.current = cashStr
+
+  React.useEffect(() => {
+    if (paymentMethod !== "mixed") return
+    const t = grandTotal
+    const cash = parseMoneyInput(cashStrRef.current)
+    setCreditStr(String(round2(Math.max(0, t - cash))))
+  }, [grandTotal, paymentMethod, setCreditStr])
+
+  const handleMixedCashChange = (raw: string) => {
+    setCashStr(raw)
+    const t = grandTotal
+    const cash = parseMoneyInput(raw)
+    setCreditStr(String(round2(Math.max(0, t - cash))))
   }
 
-  // Remove sale item
-  const removeSaleItem = (index: number) => {
-    setSaleItems(saleItems.filter((_, i) => i !== index))
+  const handleMixedCreditChange = (raw: string) => {
+    setCreditStr(raw)
+    const t = grandTotal
+    const credit = parseMoneyInput(raw)
+    setCashStr(String(round2(Math.max(0, t - credit))))
   }
 
-  // Update sale item
-  const updateSaleItem = (index: number, field: keyof SaleItem, value: any) => {
-    const updatedItems = [...saleItems]
-    updatedItems[index] = { ...updatedItems[index], [field]: value }
-    
-    // Auto-calculate total if quantity or unit_price changes
-    if (field === 'quantity' || field === 'unit_price') {
-      const item = updatedItems[index]
-      item.total = item.quantity * item.unit_price
+  const handlePaymentSelect = (value: string) => {
+    const m = value as PaymentMethod
+    setPaymentMethod(m)
+    if (m === "mixed") {
+      const t = grandTotal
+      setCashStr(t === 0 ? "0" : String(round2(t)))
+      setCreditStr("0")
     }
-    
-    // Auto-fill product details if product_id changes
-    if (field === 'product_id') {
-      const product = products.find(p => p.id === value)
-      if (product) {
-        updatedItems[index].product_name = product.name
-        updatedItems[index].unit_price = product.selling_price
-        updatedItems[index].unit = product.unit
-        updatedItems[index].total = updatedItems[index].quantity * product.selling_price
-      }
-    }
-    
-    setSaleItems(updatedItems)
   }
 
-  // Calculate total amount
-  const totalAmount = saleItems.reduce((sum, item) => sum + item.total, 0)
+  const mixedDelta =
+    paymentMethod === "mixed"
+      ? Math.abs(grandTotal - parseMoneyInput(cashStr) - parseMoneyInput(creditStr))
+      : 0
 
-  // Handle form submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    
-    if (saleItems.length === 0) {
-      toast.error("Veuillez ajouter au moins un produit")
-      return
-    }
 
-    if (!selectedClient) {
+    if (!clientId) {
       toast.error("Veuillez sélectionner un client")
       return
     }
-
-    if (saleItems.some(item => item.product_id === 0)) {
+    if (lines.length === 0) {
+      toast.error("Veuillez ajouter au moins un produit")
+      return
+    }
+    if (lines.some((l) => l.productId === 0)) {
       toast.error("Veuillez sélectionner tous les produits")
       return
     }
 
-    setLoading(true)
+    const items = buildSaveItems()
+    const total_amount = round2(items.reduce((s, i) => s + i.total_price, 0))
 
-    try {
-      const saleData = {
-        client_id: parseInt(selectedClient),
-        payment_method: paymentMethod,
-        notes: notes,
-        items: saleItems.map(item => ({
-          product_id: item.product_id,
-          quantity: item.quantity,
-          unit_price: item.unit_price
-        }))
+    let cash_amount = 0
+    let credit_amount = 0
+
+    if (paymentMethod === "cash") {
+      cash_amount = total_amount
+      credit_amount = 0
+    } else if (paymentMethod === "credit") {
+      cash_amount = 0
+      credit_amount = total_amount
+    } else {
+      cash_amount = parseMoneyInput(cashStr)
+      credit_amount = parseMoneyInput(creditStr)
+      if (Math.abs(cash_amount + credit_amount - total_amount) > 0.02) {
+        toast.error("Le montant en espèces plus le crédit doit égaler le total")
+        return
       }
+    }
 
-      const response = await fetch('/api/sales', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(saleData),
+    setLoading(true)
+    try {
+      const response = await fetch("/api/sales", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: parseInt(clientId, 10),
+          total_amount,
+          payment_method: paymentMethod,
+          cash_amount,
+          credit_amount,
+          notes: notes || null,
+          items: items.map((i) => ({
+            product_id: i.product_id,
+            quantity: i.quantity,
+            unit_price: i.unit_price,
+            additional_price: i.additional_price,
+          })),
+        }),
       })
 
-      if (response.ok) {
-        toast.success("Vente créée avec succès!")
-        router.push('/sales')
-      } else {
-        const errorData = await response.json()
-        toast.error(errorData.error || "Erreur lors de la création de la vente")
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        toast.error(errorData.error ?? "Erreur lors de la création de la vente")
+        return
       }
-    } catch (error) {
-      console.error('Error creating sale:', error)
+
+      toast.success("Vente créée avec succès!")
+      router.push("/sales")
+    } catch {
       toast.error("Erreur lors de la création de la vente")
     } finally {
       setLoading(false)
@@ -174,182 +173,165 @@ export default function NewSalePage() {
   }
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <Button
-            variant="outline"
-            onClick={() => router.push('/sales')}
-            className="flex items-center space-x-2"
-          >
+    <div className="container mx-auto space-y-6 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-4">
+          <Button type="button" variant="outline" onClick={() => router.push("/sales")} className="gap-2">
             <ArrowLeft className="h-4 w-4" />
             Retour
           </Button>
           <div>
-            <h1 className="text-3xl font-bold">Nouvelle Vente</h1>
-            <p className="text-muted-foreground">Créer une nouvelle transaction de vente</p>
+            <h1 className="text-3xl font-bold">Nouvelle vente</h1>
+            <p className="text-muted-foreground">Créer une nouvelle transaction (même logique que la fenêtre vente)</p>
           </div>
         </div>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Client and Payment Information */}
+      <form onSubmit={(e) => void handleSubmit(e)} className="space-y-6">
         <Card>
           <CardHeader>
-            <CardTitle>Informations Client et Paiement</CardTitle>
+            <CardTitle>Client et paiement</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="client">Client *</Label>
-                <Select value={selectedClient} onValueChange={setSelectedClient}>
-                  <SelectTrigger>
+                <Label htmlFor="page-sale-client">Client *</Label>
+                <Select value={clientId} onValueChange={setClientId}>
+                  <SelectTrigger id="page-sale-client">
                     <SelectValue placeholder="Sélectionner un client" />
                   </SelectTrigger>
-                  <SelectContent>
-                    {clients.map((client) => (
-                      <SelectItem key={client.id} value={client.id.toString()}>
-                        {client.name} - {client.phone}
+                  <SelectContent position="popper" className="max-h-[min(280px,50vh)]">
+                    {clientsSorted.map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>
+                        {c.phone ? `${c.name} — ${c.phone}` : c.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-              
+
               <div className="space-y-2">
-                <Label htmlFor="payment">Méthode de Paiement *</Label>
-                <Select value={paymentMethod} onValueChange={setPaymentMethod}>
-                  <SelectTrigger>
+                <Label htmlFor="page-sale-payment">Méthode de paiement *</Label>
+                <Select value={paymentMethod} onValueChange={handlePaymentSelect}>
+                  <SelectTrigger id="page-sale-payment">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent position="popper">
                     <SelectItem value="cash">Espèces</SelectItem>
                     <SelectItem value="credit">Crédit</SelectItem>
-                    <SelectItem value="bank_transfer">Virement Bancaire</SelectItem>
+                    <SelectItem value="mixed">Paiement mixte</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
-            
+
+            {paymentMethod === "mixed" ? (
+              <div className="grid grid-cols-1 gap-4 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="page-sale-cash">Montant en espèces (DH)</Label>
+                  <Input
+                    id="page-sale-cash"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={cashStr}
+                    onChange={(e) => handleMixedCashChange(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="page-sale-credit">Montant en crédit (DH)</Label>
+                  <Input
+                    id="page-sale-credit"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={creditStr}
+                    onChange={(e) => handleMixedCreditChange(e.target.value)}
+                  />
+                </div>
+                <div className="text-sm text-muted-foreground md:col-span-2">
+                  Total vente&nbsp;: <span className="font-medium text-foreground">{grandTotal.toFixed(2)} DH</span>
+                  {mixedDelta > 0.02 ? (
+                    <span className="ml-2 text-destructive">Écart&nbsp;: {mixedDelta.toFixed(2)} DH</span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
             <div className="space-y-2">
-              <Label htmlFor="notes">Notes</Label>
-              <Input
-                id="notes"
+              <Label htmlFor="page-sale-notes">Notes</Label>
+              <Textarea
+                id="page-sale-notes"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="Notes additionnelles..."
+                placeholder="Notes additionnelles…"
+                rows={2}
+                className="resize-none"
               />
             </div>
           </CardContent>
         </Card>
 
-        {/* Products */}
         <Card>
           <CardHeader>
-            <CardTitle>Produits</CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle>Produits</CardTitle>
+              <Button type="button" variant="outline" size="sm" onClick={addLine} className="gap-2">
+                <Plus className="h-4 w-4" />
+                Ajouter un produit
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            {saleItems.map((item, index) => (
-              <div key={index} className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end border p-4 rounded-lg">
-                <div className="space-y-2">
-                  <Label>Produit *</Label>
-                  <SearchableProductSelect
+            {lines.length === 0 ? (
+              <p className="rounded-md border border-dashed py-8 text-center text-sm text-muted-foreground">
+                Aucune ligne. Utilisez «&nbsp;Ajouter un produit&nbsp;».
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {lines.map((line, index) => (
+                  <SaleLineRow
+                    key={line.rowId}
+                    line={line}
                     products={products}
-                    value={item.product_id}
-                    onChange={(productId) => updateSaleItem(index, 'product_id', productId)}
-                    placeholder="Rechercher un produit..."
+                    rowIndex={index}
+                    onChange={(patch) => updateLine(line.rowId, patch)}
+                    onSelectProduct={(id) => selectProduct(line.rowId, id)}
+                    onRemove={() => removeLine(line.rowId)}
                   />
-                </div>
-                
-                <div className="space-y-2">
-                  <Label>Quantité *</Label>
-                  <Input
-                    type="number"
-                    min="1"
-                    value={item.quantity}
-                    onChange={(e) => updateSaleItem(index, 'quantity', parseInt(e.target.value) || 1)}
-                  />
-                </div>
-                
-                <div className="space-y-2">
-                  <Label>Prix Unitaire (DH)</Label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={item.unit_price}
-                    onChange={(e) => updateSaleItem(index, 'unit_price', parseFloat(e.target.value) || 0)}
-                  />
-                </div>
-                
-                <div className="space-y-2">
-                  <Label>Total (DH)</Label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    value={item.total.toFixed(2)}
-                    readOnly
-                    className="bg-muted"
-                  />
-                </div>
-                
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => removeSaleItem(index)}
-                  className="flex items-center space-x-2"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Supprimer
-                </Button>
+                ))}
               </div>
-            ))}
-            
-            <Button
-              type="button"
-              variant="outline"
-              onClick={addSaleItem}
-              className="flex items-center space-x-2"
-            >
-              <Plus className="h-4 w-4" />
-              Ajouter un Produit
-            </Button>
+            )}
           </CardContent>
         </Card>
 
-        {/* Summary */}
         <Card>
           <CardHeader>
-            <CardTitle>Résumé de la Vente</CardTitle>
+            <CardTitle>Résumé</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex justify-between items-center text-lg font-semibold">
-              <span>Montant Total:</span>
-              <span className="text-2xl text-green-600">{totalAmount.toFixed(2)} DH</span>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <span className="text-lg font-semibold">Montant total</span>
+              <span className="text-2xl font-bold tabular-nums text-green-600">{grandTotal.toFixed(2)} DH</span>
             </div>
+            {paymentMethod === "mixed" ? (
+              <p className={`mt-2 text-sm ${mixedDelta < 0.02 ? "text-green-600" : "text-destructive"}`}>
+                {mixedDelta < 0.02 ? "Paiement équilibré" : `Reste à répartir : ${mixedDelta.toFixed(2)} DH`}
+              </p>
+            ) : null}
           </CardContent>
         </Card>
 
-        {/* Submit Button */}
-        <div className="flex justify-end space-x-4">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => router.push('/sales')}
-          >
+        <div className="flex flex-wrap justify-end gap-4">
+          <Button type="button" variant="outline" onClick={() => router.push("/sales")}>
             Annuler
           </Button>
-          <Button
-            type="submit"
-            disabled={loading || saleItems.length === 0}
-            className="flex items-center space-x-2"
-          >
+          <Button type="submit" disabled={loading || lines.length === 0} className="gap-2">
             <Save className="h-4 w-4" />
-            {loading ? "Création..." : "Créer la Vente"}
+            {loading ? "Création…" : "Créer la vente"}
           </Button>
         </div>
       </form>
     </div>
   )
-} 
+}
